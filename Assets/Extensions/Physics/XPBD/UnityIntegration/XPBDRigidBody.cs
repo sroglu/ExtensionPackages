@@ -45,14 +45,13 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
         private Quaternion _initialRotation;
         private bool _isInitialized = false;
         private int _bodyInstanceID;
-        private MeshFilter _meshFilter;
 
         void Start()
         {
             _hook = FindFirstObjectByType<PhysicsSceneHook>();
             if (_hook == null) return;
             _bodyInstanceID = GetInstanceID();
-            _meshFilter = GetComponent<MeshFilter>();
+            _bodyInstanceID = GetInstanceID(); 
             InitializeBody();
         }
 
@@ -61,7 +60,7 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
         void InitializeBody()
         {
             if (_isInitialized) return;
-            Mesh mesh = _meshFilter.sharedMesh;
+            Mesh mesh = GetComponent<MeshFilter>().sharedMesh;
             if (mesh == null) return;
 
             // Performance Safety Check
@@ -214,7 +213,7 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
             float3 angLockMask = new float3(LockRotationX?0:1, LockRotationY?0:1, LockRotationZ?0:1);
 
             float invMass = (TotalMass > 0.00001f) ? 1.0f / TotalMass : 0.0f;
-            Vector3 dims = Vector3.Scale(transform.localScale, _meshFilter.sharedMesh.bounds.size);
+            Vector3 dims = Vector3.Scale(transform.localScale, GetComponent<MeshFilter>().sharedMesh.bounds.size);
             float3 invInertia = CalculateInverseInertia(TotalMass, dims);
             
             simData.BodyInverseMass[_bodyIndex] = IsKinematic ? 0.0f : invMass * linLockMask.x;
@@ -227,11 +226,13 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
                 simData.BodyVelocity[_bodyIndex] = float3.zero;
                 simData.BodyAngularVelocity[_bodyIndex] = float3.zero;
                 
+                // Sync predicted to prevent interpolation glitch
                 simData.BodyPredictedPos[_bodyIndex] = (float3)transform.position;
                 simData.BodyPredictedRot[_bodyIndex] = (quaternion)transform.rotation;
             }
             else
             {
+                // Physics -> Unity
                 float3 pos = simData.BodyPosition[_bodyIndex];
                 quaternion rot = simData.BodyRotation[_bodyIndex];
                 

@@ -288,11 +288,11 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   TotalMass: 10
-  ParticleRadius: 0.25
+  ParticleRadius: 0.1
   IsKinematic: 0
   Config:
     DeformationCompliance: 0
-  GenerationMode: 0
+  GenerationMode: 1
   MaxVertexLimit: 2500
   LockX: 1
   LockY: 1
@@ -567,10 +567,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 81fe70c6a223413d8d1a84715af6759d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  Gravity: {x: 0, y: -9.81, z: 0}
-  SolverIterations: 10
-  GridCellSize: 0.5
-  BarrierStiffnessRatio: 1
+  Gravity: {x: 0, y: -5, z: 0}
+  SolverIterations: 2
+  GridCellSize: 1
+  BarrierStiffnessRatio: 10
   MaxParticles: 50000
   MaxRigidBodies: 1000
 --- !u!4 &878726450
@@ -627,6 +627,8 @@ MonoBehaviour:
   LockRotationX: 0
   LockRotationY: 0
   LockRotationZ: 0
+  _bodyIndex: -1
+  _proxyIndex: -1
 --- !u!4 &1169395842
 Transform:
   m_ObjectHideFlags: 0
@@ -674,13 +676,13 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f69fc82eb6454d73bc926d3fe139497b, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  TotalMass: 10
-  ParticleRadius: 0.05
+  TotalMass: 1
+  ParticleRadius: 0.02
   IsKinematic: 0
   Config:
     DeformationCompliance: 0
   GenerationMode: 1
-  MaxVertexLimit: 15
+  MaxVertexLimit: 2500
   LockX: 0
   LockY: 0
   LockZ: 0
