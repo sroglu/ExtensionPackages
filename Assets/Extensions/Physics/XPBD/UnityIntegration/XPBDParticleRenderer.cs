@@ -1,14 +1,16 @@
 using UnityEngine;
+using Unity.Mathematics;
 using mehmetsrl.Physics.XPBD.Core;
 
 namespace mehmetsrl.Physics.XPBD.UnityIntegration
 {
+    // Renders all active collision proxy particles using GPU Instancing.
     public class XPBDParticleRenderer : MonoBehaviour
     {
         public PhysicsSceneHook PhysicsScene;
         public Mesh SphereMesh;
         public Material SphereMaterial;
-        public float VisualScale = 1.0f; 
+        public float VisualScale = 1.0f;
 
         private ComputeBuffer _positionBuffer;
         private ComputeBuffer _radiusBuffer;
@@ -18,22 +20,23 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
         void LateUpdate()
         {
             if (PhysicsScene == null || PhysicsScene.World == null) return;
-            PhysicsScene.CompleteJobs();
+            // The engine completes jobs at the end of its step.
 
             var simData = PhysicsScene.World.Context;
-            int count = simData.ParticleCount;
+            int count = simData.ParticleCount; // Now reads count from particle proxy list
             if (count == 0) return;
 
-            // 1. Buffers
+            // 1. Buffer Management
             if (_positionBuffer == null || _positionBuffer.count != count)
             {
-                if(_positionBuffer != null) _positionBuffer.Release();
-                _positionBuffer = new ComputeBuffer(count, 12); 
+                if (_positionBuffer != null) _positionBuffer.Release();
+                // Reading CurrentPosition array (which holds proxy positions)
+                _positionBuffer = new ComputeBuffer(count, 12);
 
-                if(_radiusBuffer != null) _radiusBuffer.Release();
-                _radiusBuffer = new ComputeBuffer(count, 4); 
+                if (_radiusBuffer != null) _radiusBuffer.Release();
+                _radiusBuffer = new ComputeBuffer(count, 4);
 
-                if(_argsBuffer != null) _argsBuffer.Release();
+                if (_argsBuffer != null) _argsBuffer.Release();
                 _argsBuffer = new ComputeBuffer(1, _args.Length * sizeof(uint), ComputeBufferType.IndirectArguments);
             }
 

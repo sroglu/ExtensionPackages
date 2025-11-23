@@ -8,41 +8,39 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
     [DefaultExecutionOrder(-100)]
     public class PhysicsSceneHook : MonoBehaviour
     {
-        // Public access to the Core Engine
         public PhysicsEngine World { get; private set; }
 
-        [Header("Simulation Settings")] [Tooltip("Global gravity vector (m/s^2).")]
-        public Vector3 Gravity = new Vector3(0, -9.81f, 0);
-
-        [Tooltip("Sub-steps per frame. Higher = More stable but expensive.")] [Range(1, 50)]
-        public int SolverIterations = 10;
-
-        [Tooltip("Size of the spatial hash cells. Should be > 2 * MaxParticleRadius.")]
+        [Header("Simulation Settings")] public Vector3 Gravity = new Vector3(0, -9.81f, 0);
+        [Range(1, 30)] public int SolverIterations = 20; // Lowered default iteration for better FPS
         public float GridCellSize = 0.5f;
 
-        [Header("Elasticity Settings (Ando's Barrier)")]
+        [Header("Elasticity Settings")]
         [Tooltip("Global multiplier for barrier stiffness relative to object stiffness.")]
         public float BarrierStiffnessRatio = 1.0f;
 
+        [Header("Capacity")] public int MaxParticles = 50000;
+        public int MaxRigidBodies = 1000;
+
+
         void Awake()
         {
-            // 1. Create Config
+            // 1. Prepare Configuration
             var config = PhysicsConfig.Default;
-            config.Gravity = Gravity;
+            config.Gravity = (float3)Gravity;
             config.SolverIterations = SolverIterations;
             config.GridCellSize = GridCellSize;
             config.BarrierStiffnessRatio = BarrierStiffnessRatio;
 
-            // 2. Initialize Pure C# Engine
-            World = new PhysicsEngine(config);
+            // 2. Initialize the Engine (RBD API)
+            World = new PhysicsEngine(config, MaxParticles, MaxRigidBodies);
         }
 
         void FixedUpdate()
         {
             if (World != null)
             {
-                // Sync config runtime to allow Editor tweaking
-                World.Config.Gravity = Gravity;
+                // Sync configuration
+                World.Config.Gravity = (float3)Gravity;
                 World.Config.SolverIterations = SolverIterations;
                 World.Config.GridCellSize = GridCellSize;
                 World.Config.BarrierStiffnessRatio = BarrierStiffnessRatio;
@@ -52,16 +50,9 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
             }
         }
 
-        // Optional: Ensure jobs are done before rendering
-        public void CompleteJobs()
-        {
-            // The Step() method currently completes all handles, 
-            // but this is good practice for future async implementations.
-        }
-
         void OnDestroy()
         {
-            // 4. Cleanup Native Arrays
+            // Cleanup Native Arrays
             World?.Dispose();
         }
     }

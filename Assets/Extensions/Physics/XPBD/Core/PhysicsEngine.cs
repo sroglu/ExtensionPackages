@@ -8,38 +8,72 @@ namespace mehmetsrl.Physics.XPBD.Core
     {
         private readonly PhysicsContext _context;
         private SpatialGrid _grid;
+        
         public PhysicsConfig Config;
         public PhysicsContext Context => _context;
 
-        public PhysicsEngine(int maxParticles = 10000)
+        public PhysicsEngine(int maxParticles = 10000, int maxBodies = 1000)
         {
             Config = PhysicsConfig.Default;
-            _context = new PhysicsContext(maxParticles);
+            _context = new PhysicsContext(maxParticles, maxBodies);
             _grid = new SpatialGrid(Config.GridCellSize);
         }
 
-        public PhysicsEngine(PhysicsConfig config, int maxParticles = 10000)
+        public PhysicsEngine(PhysicsConfig config, int maxParticles = 10000, int maxBodies = 1000)
         {
             Config = config;
-            _context = new PhysicsContext(maxParticles);
+            _context = new PhysicsContext(maxParticles, maxBodies);
             _grid = new SpatialGrid(Config.GridCellSize);
         }
 
-        public int AddBody(float3 position, float mass, float radius, float3 lockMask, int bodyID,
-            float initialStiffness = 0.0f)
+        // --- API ---
+
+        public int AddBody(float3 position, quaternion rotation, float mass, float3 inverseInertia, float3 angularVelocity)
+        {
+            int index = _context.BodyPosition.Length;
+            _context.BodyPosition.Add(position);
+            _context.BodyRotation.Add(rotation);
+            _context.BodyPredictedPos.Add(position);
+            _context.BodyPredictedRot.Add(rotation);
+            _context.BodyVelocity.Add(float3.zero);
+            _context.BodyAngularVelocity.Add(angularVelocity);
+            
+            float invMass = mass > PhysicsConstants.Epsilon ? 1.0f / mass : 0.0f;
+            _context.BodyInverseMass.Add(invMass);
+            _context.BodyInverseInertia.Add(inverseInertia);
+
+            // Initialize Slice
+            int currentTotal = _context.CurrentPosition.Length;
+            _context.BodyParticleSlices.Add(new int2(currentTotal, 0));
+
+            return index;
+        }
+
+        public int AddCollisionProxy(float3 localOffset, float radius, int bodyIndex)
         {
             int index = _context.CurrentPosition.Length;
-            _context.CurrentPosition.Add(position);
-            _context.PredictedPosition.Add(position);
-            _context.PreviousPosition.Add(position);
+            _context.CurrentPosition.Add(float3.zero); 
+            _context.PredictedPosition.Add(float3.zero);
+            _context.PreviousPosition.Add(float3.zero);
             _context.Velocity.Add(float3.zero);
-            float invMass = mass > PhysicsConstants.Epsilon ? 1.0f / mass : 0.0f;
-            _context.InverseMass.Add(invMass);
             _context.Radius.Add(radius);
-            _context.BodyIDs.Add(bodyID);
-            _context.PositionLockMask.Add(lockMask);
-            _context.CalculatedLocalStiffness.Add(initialStiffness);
+            _context.ParticleBodyID.Add(bodyIndex);
+            _context.ParticleLocalPosition.Add(localOffset);
+            _context.CalculatedLocalStiffness.Add(0.0f);
+
+            // Update Slice
+            int2 slice = _context.BodyParticleSlices[bodyIndex];
+            slice.y += 1;
+            _context.BodyParticleSlices[bodyIndex] = slice;
+            
             return index;
+        }
+
+        // FIX: Added bodyIndex parameter to track ownership
+        public void AddTriangle(int a, int b, int c, int bodyIndex)
+        {
+            _context.Triangles.Add(new int3(a, b, c));
+            _context.TriangleBodyIDs.Add(bodyIndex); // Store ID
         }
 
         public void AddConstraint(int indexA, int indexB, float restLength, float compliance)
@@ -47,19 +81,6 @@ namespace mehmetsrl.Physics.XPBD.Core
             _context.DistanceConstraints.Add(new int2(indexA, indexB));
             _context.RestLengths.Add(restLength);
             _context.Compliances.Add(compliance);
-            float stiffness = (compliance < PhysicsConstants.Epsilon)
-                ? PhysicsConstants.MaxStiffness
-                : (1.0f / compliance);
-            if (indexA < _context.CalculatedLocalStiffness.Length)
-                _context.CalculatedLocalStiffness[indexA] += stiffness;
-            if (indexB < _context.CalculatedLocalStiffness.Length)
-                _context.CalculatedLocalStiffness[indexB] += stiffness;
-        }
-
-        // NEW: Add Triangles
-        public void AddTriangle(int a, int b, int c)
-        {
-            _context.Triangles.Add(new int3(a, b, c));
         }
 
         public void Clear()
@@ -67,119 +88,123 @@ namespace mehmetsrl.Physics.XPBD.Core
             _context.Clear();
         }
 
+        // --- LOOP ---
+
         public void Step(float deltaTime)
         {
-            int particleCount = _context.CurrentPosition.Length;
-            if (particleCount == 0) return;
+            int particleCount = _context.ParticleCount;
+            int bodyCount = _context.BodyCount;
+            if (particleCount == 0 && bodyCount == 0) return;
 
             float dt = deltaTime / Config.SolverIterations;
-            if (math.abs(_grid.CellSize - Config.GridCellSize) > 1e-4f) _grid = new SpatialGrid(Config.GridCellSize);
+            if (math.abs(_grid.CellSize - Config.GridCellSize) > 1e-4f)
+                _grid = new SpatialGrid(Config.GridCellSize);
 
             JobHandle handle = default;
             for (int i = 0; i < Config.SolverIterations; i++)
             {
-                handle = RunSubStep(dt, handle, particleCount);
+                handle = RunSubStep(dt, handle, particleCount, bodyCount);
             }
-
             handle.Complete();
         }
 
-        private JobHandle RunSubStep(float dt, JobHandle dependency, int count)
+        private JobHandle RunSubStep(float dt, JobHandle dependency, int particleCount, int bodyCount)
         {
             // 1. Prediction
-            var predJob = new PhysicsJobs.PredictionJob
+            var rbPred = new PhysicsJobs.RigidBodyPredictionJob
             {
-                CurrentPosition = _context.CurrentPosition,
-                PredictedPosition = _context.PredictedPosition,
-                PreviousPosition = _context.PreviousPosition,
-                Velocity = _context.Velocity,
-                InverseMass = _context.InverseMass,
-                PositionLockMask = _context.PositionLockMask,
+                PredictedPos = _context.BodyPredictedPos.AsArray(),
+                PredictedRot = _context.BodyPredictedRot.AsArray(),
+                Velocity = _context.BodyVelocity.AsArray(),
+                AngularVelocity = _context.BodyAngularVelocity.AsArray(),
+                Position = _context.BodyPosition.AsArray(),
+                Rotation = _context.BodyRotation.AsArray(),
+                InvMass = _context.BodyInverseMass.AsArray(),
                 Gravity = Config.Gravity,
                 DeltaTime = dt
             };
-            dependency = predJob.Schedule(count, 64, dependency);
+            dependency = rbPred.Schedule(bodyCount, 64, dependency);
 
-            // 2. Clear Maps
-            dependency.Complete();
+            // 2. Sync Proxies
+            var syncJob = new PhysicsJobs.SyncProxiesJob
+            {
+                PredictedParticlePos = _context.PredictedPosition.AsArray(),
+                ParticleBodyID = _context.ParticleBodyID.AsArray(),
+                LocalPos = _context.ParticleLocalPosition.AsArray(),
+                BodyPos = _context.BodyPredictedPos.AsArray(),
+                BodyRot = _context.BodyPredictedRot.AsArray()
+            };
+            dependency = syncJob.Schedule(particleCount, 64, dependency);
+
+            // 3. Broadphase
+            dependency.Complete(); 
             _context.SpatialMap.Clear();
             _context.TriangleSpatialMap.Clear();
-
-            // 3. Build Maps (Parallel)
-            var buildPartMap = new PhysicsJobs.BuildSpatialMapJob
+            
+            var buildMap = new PhysicsJobs.BuildSpatialMapJob 
             {
                 MapWriter = _context.SpatialMap.AsParallelWriter(),
-                Positions = _context.PredictedPosition,
+                Positions = _context.PredictedPosition.AsArray(),
                 Grid = _grid
             };
-            dependency = buildPartMap.Schedule(count, 64, default);
+            dependency = buildMap.Schedule(particleCount, 64, default);
 
-            var buildTriMap = new PhysicsJobs.BuildTriangleGridJob
+            var buildTriMap = new PhysicsJobs.BuildTriangleGridJob 
             {
                 MapWriter = _context.TriangleSpatialMap.AsParallelWriter(),
-                Triangles = _context.Triangles,
-                Positions = _context.PredictedPosition,
+                Triangles = _context.Triangles.AsArray(),
+                Positions = _context.PredictedPosition.AsArray(),
                 Grid = _grid,
-                Margin = 0.2f
+                Margin = 0.05f 
             };
-            // Schedule triangle map in parallel with particle logic if possible, but sequential here for safety
             dependency = buildTriMap.Schedule(_context.Triangles.Length, 64, dependency);
 
-            // 4. Solve Barriers
-
-            // A. Particle-Particle (Ropes/Cloths)
-            var particleBarrier = new PhysicsJobs.ParticleBarrierJob
+            // 4. Barriers (Body-Centric)
+            var rbBarrier = new PhysicsJobs.RigidBodyBarrierJob
             {
-                PredictedPosition = _context.PredictedPosition,
-                InverseMass = _context.InverseMass,
-                Radius = _context.Radius,
-                SpatialMap = _context.SpatialMap,
-                BodyIDs = _context.BodyIDs,
-                CalculatedLocalStiffness = _context.CalculatedLocalStiffness,
+                BodyPos = _context.BodyPredictedPos.AsArray(),
+                BodyRot = _context.BodyPredictedRot.AsArray(),
+                BodyParticleSlices = _context.BodyParticleSlices.AsArray(),
+                
+                ParticlePos = _context.PredictedPosition.AsArray(),
+                ParticleRadius = _context.Radius.AsArray(),
+                ParticleBodyID = _context.ParticleBodyID.AsArray(),
+                
+                BodyInvMass = _context.BodyInverseMass.AsArray(),
+                BodyInvInertia = _context.BodyInverseInertia.AsArray(),
+                
+                Triangles = _context.Triangles.AsArray(),
+                TriangleBodyIDs = _context.TriangleBodyIDs.AsArray(), // FIX: Pass ID Array
+                
+                SpatialMap = _context.SpatialMap, 
+                TriangleSpatialMap = _context.TriangleSpatialMap, 
+                
                 Grid = _grid,
                 DeltaTime = dt,
-                BarrierStiffnessRatio = Config.BarrierStiffnessRatio
+                BarrierRatio = Config.BarrierStiffnessRatio,
             };
-            dependency = particleBarrier.Schedule(count, 16, dependency);
+            dependency = rbBarrier.Schedule(bodyCount, 16, dependency);
 
-            // B. Point-Triangle (Rigid Bodies / Walls)
-            var triBarrier = new PhysicsJobs.TriangleBarrierJob
+            // 5. Integration
+            var rbInteg = new PhysicsJobs.RigidBodyVelocityUpdateJob
             {
-                PredictedPosition = _context.PredictedPosition,
-                InverseMass = _context.InverseMass,
-                Radius = _context.Radius,
-                BodyIDs = _context.BodyIDs,
-                Triangles = _context.Triangles,
-                TriangleSpatialMap = _context.TriangleSpatialMap,
-                CalculatedLocalStiffness = _context.CalculatedLocalStiffness,
-                Grid = _grid,
-                DeltaTime = dt,
-                BarrierStiffnessRatio = Config.BarrierStiffnessRatio
-            };
-            dependency = triBarrier.Schedule(count, 16, dependency);
-
-            // 5. Solve Topology
-            var distJob = new PhysicsJobs.DistanceConstraintJob
-            {
-                PredictedPosition = _context.PredictedPosition,
-                InverseMass = _context.InverseMass,
-                Pairs = _context.DistanceConstraints,
-                RestLengths = _context.RestLengths,
-                Compliances = _context.Compliances,
+                Velocity = _context.BodyVelocity.AsArray(),
+                AngularVelocity = _context.BodyAngularVelocity.AsArray(),
+                Position = _context.BodyPosition.AsArray(),
+                Rotation = _context.BodyRotation.AsArray(),
+                PredictedPos = _context.BodyPredictedPos.AsArray(),
+                PredictedRot = _context.BodyPredictedRot.AsArray(),
                 DeltaTime = dt
             };
-            dependency = distJob.Schedule(dependency);
+            dependency = rbInteg.Schedule(bodyCount, 64, dependency);
 
-            // 6. Integrate
-            var velJob = new PhysicsJobs.VelocityUpdateJob
+            // 6. Visual Sync
+            var vizJob = new PhysicsJobs.CopyParticlesJob
             {
-                Velocity = _context.Velocity,
-                CurrentPosition = _context.CurrentPosition,
-                PredictedPosition = _context.PredictedPosition,
-                PreviousPosition = _context.PreviousPosition,
-                DeltaTime = dt
+                Output = _context.CurrentPosition.AsArray(),
+                Input = _context.PredictedPosition.AsArray()
             };
-            dependency = velJob.Schedule(count, 64, dependency);
+            dependency = vizJob.Schedule(particleCount, 64, dependency);
 
             return dependency;
         }

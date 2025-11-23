@@ -8,38 +8,38 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
     [System.Serializable]
     public struct RigidBodyConfig
     {
-        [Tooltip("Inverse Stiffness. 0 = Rigid (Concrete), 1 = Soft (Rubber).")]
-        [Range(0f, 1f)] public float DeformationCompliance; 
+        [Tooltip("0 = Rigid (Concrete), 1 = Soft (Rubber).")] [Range(0f, 1f)]
+        public float DeformationCompliance;
+
         public static RigidBodyConfig Default => new RigidBodyConfig { DeformationCompliance = 0.0f };
     }
 
     public enum BodyTopology
     {
-        BoxCornersOnly, 
-        MeshVertices    
+        BoxCornersOnly,
+        MeshVertices
     }
 
     [RequireComponent(typeof(MeshFilter))]
     public class XPBDRigidBody : MonoBehaviour
     {
-        [Header("Physical Properties")]
-        public float TotalMass = 10.0f;
-        public float ParticleRadius = 0.05f; 
+        [Header("Physical Properties")] public float TotalMass = 10.0f;
+        public float ParticleRadius = 0.05f;
         public bool IsKinematic = false;
         public RigidBodyConfig Config = RigidBodyConfig.Default;
-        
-        [Header("Topology")]
-        public BodyTopology GenerationMode = BodyTopology.BoxCornersOnly;
 
-        [Header("Constraints")]
-        public bool LockX = false; public bool LockY = false; public bool LockZ = false;
-        public bool LockRotationX = false; public bool LockRotationY = false; public bool LockRotationZ = false;
+        [Header("Topology")] public BodyTopology GenerationMode = BodyTopology.BoxCornersOnly;
 
-        // Runtime State
+        [Header("Constraints")] public bool LockX = false;
+        public bool LockY = false;
+        public bool LockZ = false;
+        public bool LockRotationX = false;
+        public bool LockRotationY = false;
+        public bool LockRotationZ = false;
+
         private PhysicsSceneHook _hook;
-        private int[] _particleIndices; 
-        private Vector3[] _initialLocalPositions;
-        private Quaternion _initialRotation;
+        private int _bodyIndex = -1;
+        private List<int> _proxyIndices = new List<int>();
         private bool _isInitialized = false;
         private int _bodyInstanceID;
 
@@ -47,124 +47,22 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
         {
             _hook = FindFirstObjectByType<PhysicsSceneHook>();
             if (_hook == null) return;
-            _bodyInstanceID = GetInstanceID(); 
+            _bodyInstanceID = GetInstanceID();
             InitializeBody();
         }
 
-        // --- CORE INITIALIZATION ---
-
-        void InitializeBody()
+        // --- HELPERS ---
+        private float3 CalculateInverseInertia(float mass, Vector3 dimensions)
         {
-            if (_isInitialized) return;
-            Mesh mesh = GetComponent<MeshFilter>().sharedMesh;
-            if (mesh == null) return;
-
-            _initialRotation = transform.rotation;
-            List<Vector3> finalPoints = new List<Vector3>();
-            Bounds b = mesh.bounds;
-
-            int[] indexRemap = null;
-
-            if (GenerationMode == BodyTopology.BoxCornersOnly)
-            {
-                finalPoints.Add(b.min); finalPoints.Add(b.max);
-                finalPoints.Add(new Vector3(b.min.x, b.min.y, b.max.z));
-                finalPoints.Add(new Vector3(b.min.x, b.max.y, b.min.z));
-                finalPoints.Add(new Vector3(b.max.x, b.min.y, b.max.z));
-                finalPoints.Add(new Vector3(b.max.x, b.max.y, b.min.z));
-                finalPoints.Add(new Vector3(b.min.x, b.max.y, b.max.z));
-                finalPoints.Add(new Vector3(b.max.x, b.min.y, b.min.z));
-            }
-            else // MeshVertices
-            {
-                finalPoints = CleanVerticesWithRemap(mesh.vertices, 0.001f, out indexRemap);
-            }
-
-            // Center Strut setup
-            bool useCenterStrut = (GenerationMode == BodyTopology.MeshVertices);
-            int centerPointIndex = -1;
-            if (useCenterStrut) finalPoints.Add(b.center); 
-
-            // 2. CREATE PARTICLES
-            int count = finalPoints.Count;
-            _particleIndices = new int[count];
-            
-            Vector3 localCOM = Vector3.zero;
-            foreach (var p in finalPoints) localCOM += p;
-            localCOM /= count;
-
-            _initialLocalPositions = new Vector3[count];
-            for(int i=0; i<count; i++) _initialLocalPositions[i] = finalPoints[i] - localCOM;
-
-            float massPerParticle = IsKinematic ? 0.0f : (TotalMass / count);
-            float stiffness = (Config.DeformationCompliance < PhysicsConstants.Epsilon) ? PhysicsConstants.MaxStiffness : (1.0f / Config.DeformationCompliance);
-            float3 lockMask = new float3(LockX?0:1, LockY?0:1, LockZ?0:1);
-
-            for (int i = 0; i < count; i++)
-            {
-                Vector3 worldPos = transform.TransformPoint(_initialLocalPositions[i]);
-                float r = (useCenterStrut && i == count - 1) ? 0.0f : ParticleRadius;
-
-                _particleIndices[i] = _hook.World.AddBody(
-                    worldPos, massPerParticle, r, lockMask, _bodyInstanceID, stiffness
-                );
-            }
-
-            if (useCenterStrut) centerPointIndex = _particleIndices[count - 1];
-
-            // 3. CREATE TOPOLOGY
-            if (GenerationMode == BodyTopology.MeshVertices)
-            {
-                int[] triangles = mesh.triangles;
-                HashSet<long> addedEdges = new HashSet<long>(); 
-
-                for (int i = 0; i < triangles.Length; i += 3)
-                {
-                    int idxA_New = indexRemap[triangles[i]];
-                    int idxB_New = indexRemap[triangles[i+1]];
-                    int idxC_New = indexRemap[triangles[i+2]];
-
-                    // A. Edges (Structure)
-                    AddEdgeConstraint(idxA_New, idxB_New, addedEdges, _initialLocalPositions);
-                    AddEdgeConstraint(idxB_New, idxC_New, addedEdges, _initialLocalPositions);
-                    AddEdgeConstraint(idxC_New, idxA_New, addedEdges, _initialLocalPositions);
-                    
-                    // B. Triangles (Collision Surface)
-                    if (idxA_New < count && idxB_New < count && idxC_New < count)
-                    {
-                        int pA = _particleIndices[idxA_New];
-                        int pB = _particleIndices[idxB_New];
-                        int pC = _particleIndices[idxC_New];
-                        _hook.World.AddTriangle(pA, pB, pC);
-                    }
-                }
-
-                // C. Center Struts
-                if (centerPointIndex != -1)
-                {
-                    Vector3 centerLocalPos = _initialLocalPositions[count - 1];
-                    float strutCompliance = Mathf.Max(Config.DeformationCompliance, 0.0001f);
-
-                    for (int i = 0; i < count - 1; i++)
-                    {
-                        float restDist = Vector3.Distance(_initialLocalPositions[i], centerLocalPos);
-                        _hook.World.AddConstraint(_particleIndices[i], centerPointIndex, restDist, strutCompliance);
-                    }
-                }
-            }
-            else // Box Corners
-            {
-                for (int i = 0; i < count; i++)
-                {
-                    for (int j = i + 1; j < count; j++)
-                    {
-                        float restDist = Vector3.Distance(_initialLocalPositions[i], _initialLocalPositions[j]);
-                        _hook.World.AddConstraint(_particleIndices[i], _particleIndices[j], restDist, Config.DeformationCompliance);
-                    }
-                }
-            }
-
-            _isInitialized = true;
+            if (mass < PhysicsConstants.Epsilon) return float3.zero;
+            float invMass = 1.0f / mass;
+            float x = dimensions.x;
+            float y = dimensions.y;
+            float z = dimensions.z;
+            float invIx = 12.0f * invMass / (y * y + z * z);
+            float invIy = 12.0f * invMass / (x * x + z * z);
+            float invIz = 12.0f * invMass / (x * x + y * y);
+            return new float3(invIx, invIy, invIz);
         }
 
         List<Vector3> CleanVerticesWithRemap(Vector3[] source, float threshold, out int[] remapTable)
@@ -172,12 +70,10 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
             List<Vector3> clean = new List<Vector3>();
             remapTable = new int[source.Length];
             float threshSq = threshold * threshold;
-
             for (int i = 0; i < source.Length; i++)
             {
                 Vector3 p = source[i];
                 int foundIndex = -1;
-
                 for (int j = 0; j < clean.Count; j++)
                 {
                     if (Vector3.SqrMagnitude(p - clean[j]) < threshSq)
@@ -187,176 +83,148 @@ namespace mehmetsrl.Physics.XPBD.UnityIntegration
                     }
                 }
 
-                if (foundIndex != -1)
-                {
-                    remapTable[i] = foundIndex;
-                }
+                if (foundIndex != -1) remapTable[i] = foundIndex;
                 else
                 {
                     clean.Add(p);
                     remapTable[i] = clean.Count - 1;
                 }
             }
+
             return clean;
         }
 
-        void AddEdgeConstraint(int localIdxA, int localIdxB, HashSet<long> edges, Vector3[] points)
+        // --- INITIALIZATION ---
+        void InitializeBody()
         {
-            if (localIdxA == localIdxB) return;
+            if (_isInitialized) return;
+            Mesh mesh = GetComponent<MeshFilter>().sharedMesh;
+            if (mesh == null) return;
 
-            int a = Mathf.Min(localIdxA, localIdxB);
-            int b = Mathf.Max(localIdxA, localIdxB);
-            long key = ((long)a << 32) | (uint)b;
+            List<Vector3> finalPoints = new List<Vector3>();
+            Bounds b = mesh.bounds;
+            int[] indexRemap = null;
 
-            if (!edges.Contains(key))
+            if (GenerationMode == BodyTopology.BoxCornersOnly)
             {
-                edges.Add(key);
-                float dist = Vector3.Distance(points[a], points[b]);
-                _hook.World.AddConstraint(_particleIndices[a], _particleIndices[b], dist, Config.DeformationCompliance);
+                finalPoints.Add(b.min);
+                finalPoints.Add(b.max);
+                finalPoints.Add(new Vector3(b.min.x, b.min.y, b.max.z));
+                finalPoints.Add(new Vector3(b.min.x, b.max.y, b.min.z));
+                finalPoints.Add(new Vector3(b.max.x, b.min.y, b.max.z));
+                finalPoints.Add(new Vector3(b.max.x, b.max.y, b.min.z));
+                finalPoints.Add(new Vector3(b.min.x, b.max.y, b.max.z));
+                finalPoints.Add(new Vector3(b.max.x, b.min.y, b.min.z));
             }
+            else
+            {
+                finalPoints = CleanVerticesWithRemap(mesh.vertices, 0.001f, out indexRemap);
+            }
+
+            bool useCenterStrut = (GenerationMode == BodyTopology.MeshVertices);
+            if (useCenterStrut) finalPoints.Add(b.center);
+
+            int count = finalPoints.Count;
+            Vector3 localCOM = Vector3.zero;
+            foreach (var p in finalPoints) localCOM += p;
+            localCOM /= count;
+
+            Vector3[] adjustedPoints = new Vector3[count];
+            for (int i = 0; i < count; i++) adjustedPoints[i] = finalPoints[i] - localCOM;
+
+            Vector3 dims = Vector3.Scale(transform.localScale, mesh.bounds.size);
+            float simMass = IsKinematic ? 0.0f : TotalMass;
+            float3 invInertia = CalculateInverseInertia(TotalMass, dims);
+
+            float3 linLock = new float3(LockX ? 0 : 1, LockY ? 0 : 1, LockZ ? 0 : 1);
+            float3 angLock = new float3(LockRotationX ? 0 : 1, LockRotationY ? 0 : 1, LockRotationZ ? 0 : 1);
+
+            // 1. Add Body
+            _bodyIndex = _hook.World.AddBody(
+                (float3)transform.position, (quaternion)transform.rotation,
+                simMass * linLock.x, invInertia * angLock, float3.zero
+            );
+
+            // 2. Add Proxies
+            for (int i = 0; i < count; i++)
+            {
+                float r = (useCenterStrut && i == count - 1) ? 0.0f : ParticleRadius;
+                _proxyIndices.Add(_hook.World.AddCollisionProxy(
+                    (float3)adjustedPoints[i], r, _bodyIndex
+                ));
+            }
+
+            // 3. Add Triangles (Collision Surface)
+            if (GenerationMode == BodyTopology.MeshVertices)
+            {
+                int[] triangles = mesh.triangles;
+                for (int i = 0; i < triangles.Length; i += 3)
+                {
+                    int idxA = indexRemap[triangles[i]];
+                    int idxB = indexRemap[triangles[i + 1]];
+                    int idxC = indexRemap[triangles[i + 2]];
+
+                    int pA = _proxyIndices[idxA];
+                    int pB = _proxyIndices[idxB];
+                    int pC = _proxyIndices[idxC];
+
+                    // FIX: Send _bodyIndex to prevent self-collision
+                    _hook.World.AddTriangle(pA, pB, pC, _bodyIndex);
+                }
+            }
+
+            _isInitialized = true;
         }
 
-        // --- FIXED UPDATE & SHAPE MATCHING ---
-
+        // --- RUNTIME ---
         void FixedUpdate()
         {
-            if (!_isInitialized || _particleIndices == null || _hook == null || _hook.World == null) return;
+            if (!_isInitialized || _bodyIndex == -1 || _hook == null || _hook.World == null) return;
             var simData = _hook.World.Context;
 
-            float3 lockMask = new float3(LockX?0:1, LockY?0:1, LockZ?0:1);
+            float3 linLock = new float3(LockX ? 0 : 1, LockY ? 0 : 1, LockZ ? 0 : 1);
+            float3 angLock = new float3(LockRotationX ? 0 : 1, LockRotationY ? 0 : 1, LockRotationZ ? 0 : 1);
 
-            for (int i = 0; i < _particleIndices.Length; i++)
+            float invMass = (TotalMass > 0.00001f) ? 1.0f / TotalMass : 0.0f;
+            Vector3 dims = Vector3.Scale(transform.localScale, GetComponent<MeshFilter>().sharedMesh.bounds.size);
+            float3 invInertia = CalculateInverseInertia(TotalMass, dims);
+
+            simData.BodyInverseMass[_bodyIndex] = IsKinematic ? 0.0f : invMass * linLock.x;
+            simData.BodyInverseInertia[_bodyIndex] = invInertia * angLock;
+
+            if (IsKinematic)
             {
-                int idx = _particleIndices[i];
-                if (idx >= simData.ParticleCount) continue;
+                simData.BodyPosition[_bodyIndex] = (float3)transform.position;
+                simData.BodyRotation[_bodyIndex] = (quaternion)transform.rotation;
+                simData.BodyVelocity[_bodyIndex] = float3.zero;
+                simData.BodyAngularVelocity[_bodyIndex] = float3.zero;
 
-                simData.PositionLockMask[idx] = lockMask;
-
-                if (IsKinematic)
-                {
-                    Vector3 targetPos = transform.TransformPoint(_initialLocalPositions[i]);
-                    simData.CurrentPosition[idx] = targetPos;
-                    simData.PredictedPosition[idx] = targetPos;
-                    simData.Velocity[idx] = float3.zero;
-                    simData.InverseMass[idx] = 0.0f;
-                }
-                else
-                {
-                    if (simData.InverseMass[idx] == 0.0f && TotalMass > 0)
-                         simData.InverseMass[idx] = 1.0f / (TotalMass / _particleIndices.Length);
-                }
+                // Sync predicted to avoid interpolation glitches
+                simData.BodyPredictedPos[_bodyIndex] = (float3)transform.position;
+                simData.BodyPredictedRot[_bodyIndex] = (quaternion)transform.rotation;
             }
-
-            if (!IsKinematic) UpdateTransformAndApplyRotationLocks();
-        }
-
-        void UpdateTransformAndApplyRotationLocks()
-        {
-            var simData = _hook.World.Context;
-            int count = _particleIndices.Length;
-
-            // 1. Center of Mass
-            Vector3 currentCOM = Vector3.zero;
-            int validParticles = 0;
-
-            for (int i = 0; i < count; i++)
+            else
             {
-                int idx = _particleIndices[i];
-                if (idx < simData.ParticleCount)
+                float3 pos = simData.BodyPosition[_bodyIndex];
+                quaternion rot = simData.BodyRotation[_bodyIndex];
+
+                if (!math.any(math.isnan(pos)))
                 {
-                    float3 p = simData.CurrentPosition[idx];
-                    if (math.any(math.isnan(p)) || math.any(math.isinf(p))) return; 
-                    currentCOM += (Vector3)p;
-                    validParticles++;
-                }
-            }
-            
-            if (validParticles == 0) return;
-            currentCOM /= validParticles;
-
-            // 2. Rotation (Shape Matching)
-            Vector3 col0 = Vector3.zero, col1 = Vector3.zero, col2 = Vector3.zero;
-            for (int i = 0; i < count; i++)
-            {
-                int idx = _particleIndices[i];
-                if (idx >= simData.ParticleCount) continue;
-
-                Vector3 p = (Vector3)simData.CurrentPosition[idx] - currentCOM;
-                Vector3 q = Vector3.Scale(_initialLocalPositions[i], transform.localScale); 
-
-                col0 += p * q.x; col1 += p * q.y; col2 += p * q.z;
-            }
-
-            Matrix4x4 A = Matrix4x4.identity;
-            A.SetColumn(0, col0); A.SetColumn(1, col1); A.SetColumn(2, col2); A[3, 3] = 1;
-
-            Vector3 forward = A.GetColumn(2); 
-            Vector3 up = A.GetColumn(1);      
-            Quaternion derivedRotation = transform.rotation;
-
-            if (forward.sqrMagnitude > PhysicsConstants.Epsilon && up.sqrMagnitude > PhysicsConstants.Epsilon)
-                derivedRotation = Quaternion.LookRotation(forward, up);
-
-            // 3. Locks
-            Vector3 currentEuler = derivedRotation.eulerAngles;
-            Vector3 initEuler = _initialRotation.eulerAngles;
-
-            if (LockRotationX) currentEuler.x = initEuler.x;
-            if (LockRotationY) currentEuler.y = initEuler.y;
-            if (LockRotationZ) currentEuler.z = initEuler.z;
-
-            Quaternion finalRotation = Quaternion.Euler(currentEuler);
-
-            transform.position = currentCOM;
-            transform.rotation = finalRotation;
-
-            // 4. Inverse Dynamics (Shape Correction & Velocity Sync)
-            if (!IsKinematic)
-            {
-                // Stiffness Alpha (Stiffness clamping for Jitter reduction)
-                float stiffnessAlpha = (Config.DeformationCompliance < 1e-5f) ? 1.0f : (0.1f / Config.DeformationCompliance);
-                stiffnessAlpha = Mathf.Min(stiffnessAlpha, 0.998f); 
-                stiffnessAlpha = Mathf.Clamp01(stiffnessAlpha);
-                float dt = Time.fixedDeltaTime;
-
-                for (int i = 0; i < count; i++)
-                {
-                    int idx = _particleIndices[i];
-                    if (idx >= simData.ParticleCount) continue;
-
-                    Vector3 targetPos = currentCOM + (finalRotation * Vector3.Scale(_initialLocalPositions[i], transform.localScale));
-                    Vector3 currentPos = (Vector3)simData.CurrentPosition[idx];
-                    
-                    // Position Correction
-                    Vector3 newPos = Vector3.Lerp(currentPos, targetPos, stiffnessAlpha);
-                    
-                    // Velocity Correction (CRITICAL FIX)
-                    Vector3 prevPos = (Vector3)simData.PreviousPosition[idx];
-                    Vector3 newVel = (newPos - prevPos) / dt;
-
-                    // Clamping and Damping
-                    if (newVel.sqrMagnitude > 10000.0f) newVel = newVel.normalized * 100.0f;
-                    
-                    // Damping (Adjusted for stable fall - 0.97f was too high)
-                    newVel *= 0.995f; 
-
-                    // Write back
-                    simData.CurrentPosition[idx] = newPos;
-                    simData.PredictedPosition[idx] = newPos;
-                    simData.Velocity[idx] = newVel;
+                    transform.position = (Vector3)pos;
+                    transform.rotation = (Quaternion)rot;
                 }
             }
         }
 
         void OnDrawGizmosSelected()
         {
-            if (_particleIndices != null && _hook != null && _hook.World != null)
+            if (_proxyIndices.Count > 0 && _hook != null && _hook.World != null)
             {
                 Gizmos.color = Color.green;
                 var simData = _hook.World.Context;
-                foreach (var idx in _particleIndices)
+                foreach (var idx in _proxyIndices)
                 {
-                    if(idx < simData.ParticleCount)
+                    if (idx < simData.ParticleCount)
                         Gizmos.DrawSphere((Vector3)simData.CurrentPosition[idx], ParticleRadius);
                 }
             }
