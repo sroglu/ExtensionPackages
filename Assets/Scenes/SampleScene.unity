@@ -293,6 +293,7 @@ MonoBehaviour:
   Config:
     DeformationCompliance: 0
   GenerationMode: 0
+  MaxVertexLimit: 2500
   LockX: 1
   LockY: 1
   LockZ: 1
@@ -678,7 +679,8 @@ MonoBehaviour:
   IsKinematic: 0
   Config:
     DeformationCompliance: 0
-  GenerationMode: 0
+  GenerationMode: 1
+  MaxVertexLimit: 15
   LockX: 0
   LockY: 0
   LockZ: 0
